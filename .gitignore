@@ -1,0 +1,11 @@
+# 运行时生成
+FFY_config.json
+FFY_logs/
+
+# Python
+__pycache__/
+*.pyc
+
+# 临时/截图
+_*.txt
+_*.png
