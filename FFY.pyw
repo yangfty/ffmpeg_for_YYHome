@@ -32,7 +32,7 @@ from tkinter.scrolledtext import ScrolledText
 # 常量
 # ----------------------------------------------------------------------------
 APP_TITLE = "FFY · ffmpeg_for_YYHome"
-APP_VER = "V0.1.0"
+APP_VER = "V0.1.1"
 DEFAULT_FFMPEG = r"C:\Installed\FFmpeg\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_config.json")
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_logs")
@@ -717,7 +717,7 @@ class App:
                         arrowcolor=C_MUT, relief="flat")
         style.map("Horizontal.TScrollbar", background=[("active", "#B7C2D9")])
         style.configure("TProgressbar", background=C_ACCENT, troughcolor=C_FIELD,
-                        borderwidth=0, thickness=12)
+                        borderwidth=0, thickness=18)
         style.configure("TLabelframe", background=C_CARD, bordercolor=C_BORDER)
         style.configure("TLabelframe.Label", background=C_CARD, foreground=C_MUT,
                         font=(F, 9, "bold"))
@@ -725,7 +725,7 @@ class App:
     # ---------------------------------------------------------------- UI
     def _build_ui(self):
         self.root.title("%s %s" % (APP_TITLE, APP_VER))
-        self.root.geometry("1180x800")
+        self.root.geometry("1180x740")
         self.root.minsize(980, 660)
 
         outer = ttk.Frame(self.root, padding=(0, 0))
@@ -885,6 +885,24 @@ class App:
         CuteButton(r4, text="ffmpeg 路径…", height=36, size=10, padx=18, bg=C_CARD,
                    command=self.pick_ffmpeg).pack(side="right")
 
+        # ---- 日志（收纳于高级选项内）----
+        lf = ttk.Frame(self.adv, style="Card.TFrame")
+        lf.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        lf.columnconfigure(0, weight=1)
+        logbar = ttk.Frame(lf, style="Card.TFrame")
+        logbar.grid(row=0, column=0, sticky="ew")
+        ttk.Label(logbar, text="运行日志", style="CardDim.TLabel",
+                  font=("Microsoft YaHei UI", 9, "bold")).pack(side="left")
+        ttk.Label(logbar, text="完整日志同时保存在 FFY_logs 文件夹", style="Tiny.TLabel",
+                  background=C_CARD).pack(side="left", padx=(10, 0))
+        self.log = ScrolledText(lf, height=6, state="disabled", font=("Consolas", 9),
+                                wrap="char", bg="#FAFBFD", fg=C_MUT, relief="flat",
+                                insertbackground=C_TEXT, selectbackground="#DCE4FA")
+        self.log.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.log.tag_config("ok", foreground=C_OK)
+        self.log.tag_config("err", foreground=C_ERR)
+        self.log.tag_config("dim", foreground=C_DIM)
+
         # ---- 底部控制条 ----
         bottom = ttk.Frame(outer, style="Card.TFrame", padding=(16, 12))
         bottom.grid(row=3, column=0, sticky="ew", padx=12, pady=(10, 12))
@@ -902,22 +920,6 @@ class App:
         self.overall.grid(row=0, column=2, sticky="ew", padx=18)
         self.lbl_overall = ttk.Label(bottom, text="就绪 · 共 0 个文件", style="CardDim.TLabel")
         self.lbl_overall.grid(row=0, column=3)
-
-        # ---- 日志 ----
-        lf = ttk.Frame(outer, style="Card.TFrame", padding=(16, 4, 16, 10))
-        lf.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
-        lf.columnconfigure(0, weight=1)
-        logbar = ttk.Frame(lf, style="Card.TFrame")
-        logbar.grid(row=0, column=0, sticky="ew")
-        ttk.Label(logbar, text="日志", style="CardDim.TLabel",
-                  font=("Microsoft YaHei UI", 9, "bold")).pack(side="left")
-        self.log = ScrolledText(lf, height=6, state="disabled", font=("Consolas", 9),
-                                wrap="char", bg="#FAFBFD", fg=C_MUT, relief="flat",
-                                insertbackground=C_TEXT, selectbackground="#DCE4FA")
-        self.log.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        self.log.tag_config("ok", foreground=C_OK)
-        self.log.tag_config("err", foreground=C_ERR)
-        self.log.tag_config("dim", foreground=C_DIM)
 
         self.menu = tk.Menu(self.root, tearoff=0, bg=C_CARD, fg=C_TEXT,
                             activebackground=C_HOVER, activeforeground=C_TEXT,
@@ -1347,7 +1349,7 @@ class App:
     def _refresh_row(self, t: Task):
         cfg = self.cfg
         vals = {
-            "status": t.status + ((" %s" % t.speed) if t.status == ST_RUNNING and t.speed else ""),
+            "status": t.status,
             "progress": ("%.0f%%" % t.progress) if t.status == ST_RUNNING else (
                 "100%" if t.status == ST_DONE and t.progress >= 100 else ""),
             "video": video_desc(t.info),
@@ -1379,7 +1381,8 @@ class App:
                 for t in self.tasks.values():
                     if t.status in (ST_READY, ST_RUNNING) and t.info:
                         rem += t.info["duration"] * (1 - t.progress / 100.0)
-                extra = " · 速度 %s · 剩余约 %s" % (running.speed, fmt_duration(rem / fac))
+                if rem > 0:
+                    extra = " · 剩余约 %s" % fmt_duration(rem / fac)
             except (ValueError, ZeroDivisionError):
                 pass
         self.lbl_overall.config(text=("%d/%d 完成%s" % (done, n, extra)) if n else "就绪 · 共 0 个文件")
