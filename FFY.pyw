@@ -32,7 +32,7 @@ from tkinter.scrolledtext import ScrolledText
 # 常量
 # ----------------------------------------------------------------------------
 APP_TITLE = "FFY · ffmpeg_for_YYHome"
-APP_VER = "V0.1.1"
+APP_VER = "V0.1.2"
 DEFAULT_FFMPEG = r"C:\Installed\FFmpeg\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_config.json")
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_logs")
@@ -321,12 +321,16 @@ def build_cmd(info, cfg: Settings, out_path):
     return cmd
 
 
-def resolve_out_path(info, cfg: Settings):
+def resolve_out_path(info, cfg: Settings, task=None):
     src = info["path"]
     stem = os.path.splitext(os.path.basename(src))[0]
     if stem.lower().endswith(".ffy"):
         stem = stem[:-4]
-    if cfg.out_mode == "subfolder":
+    if task is not None and getattr(task, "out_dir", ""):
+        # 文件夹批量任务：统一输出到指定目录（忽略原层级），重名加后缀
+        d = task.out_dir
+        stem += getattr(task, "out_suffix", "") or ""
+    elif cfg.out_mode == "subfolder":
         d = os.path.join(os.path.dirname(src), cfg.out_subfolder or "FFY_输出")
     elif cfg.out_mode == "same":
         d = os.path.dirname(src)
@@ -362,6 +366,8 @@ class Task:
     iid: str
     path: str
     info: dict = None
+    out_dir: str = ""       # 文件夹批量任务的统一输出目录（空=跟随设置）
+    out_suffix: str = ""    # 平铺重名时追加的后缀，如 " (2)"
     status: str = ST_WAIT_PROBE
     progress: float = 0.0
     speed: str = ""
@@ -1067,7 +1073,9 @@ class App:
             return
         found = []
         for dirpath, dirnames, filenames in os.walk(d):
-            dirnames[:] = [x for x in dirnames if x not in ("FFY_输出", "$RECYCLE.BIN", "System Volume Information")]
+            dirnames[:] = [x for x in dirnames
+                           if x not in ("$RECYCLE.BIN", "System Volume Information")
+                           and not x.startswith("FFY_输出")]
             for fn in filenames:
                 if os.path.splitext(fn)[1].lower() in VIDEO_EXTS and not fn.startswith((".", "._")):
                     p = os.path.join(dirpath, fn)
@@ -1077,16 +1085,38 @@ class App:
                     except OSError:
                         pass
         found.sort()
+        if not found:
+            self.log_line("扫描完成：未发现视频文件（%s）" % d, "dim")
+            return
+        # 统一输出目录：所选文件夹的同级位置，如 下载\视频 -> 下载\FFY_输出
+        cfg = self._read_cfg_from_ui()
+        if cfg.out_mode == "custom" and cfg.out_custom:
+            out_dir = cfg.out_custom
+        else:
+            parent = os.path.dirname(os.path.abspath(d)) or os.path.abspath(d)
+            out_dir = os.path.join(parent, cfg.out_subfolder or "FFY_输出")
+        # 平铺后同名文件加后缀：(2) (3) …
+        seen = {}
+        dup = 0
         for p in found:
-            self.add_task(p)
-        self.log_line("扫描完成：%s（%d 个视频文件）" % (d, len(found)), "dim")
+            stem = os.path.splitext(os.path.basename(p))[0].lower()
+            n = seen.get(stem, 0) + 1
+            seen[stem] = n
+            if n > 1:
+                dup += 1
+            self.add_task(p, out_dir=out_dir,
+                          out_suffix=(" (%d)" % n) if n > 1 else "")
+        msg = "扫描完成：%s（%d 个视频文件）→ 统一输出到 %s" % (d, len(found), out_dir)
+        if dup:
+            msg += "（%d 个同名文件已自动加序号后缀）" % dup
+        self.log_line(msg, "dim")
 
-    def add_task(self, path):
+    def add_task(self, path, out_dir="", out_suffix=""):
         if any(t.path == path for t in self.tasks.values()):
             return
         self.iid_seq += 1
         iid = str(self.iid_seq)
-        t = Task(iid=iid, path=path)
+        t = Task(iid=iid, path=path, out_dir=out_dir, out_suffix=out_suffix)
         self.tasks[iid] = t
         self.tree.insert("", "end", iid=iid, text=os.path.basename(path),
                          values=(ST_WAIT_PROBE, "", "…", "…", "…", "", "", ""))
@@ -1198,7 +1228,7 @@ class App:
                     self._post_row(t)
                     self._post_log("跳过（已是目标格式）：%s" % t.info["name"], "dim")
                     continue
-                out = resolve_out_path(t.info, cfg)
+                out = resolve_out_path(t.info, cfg, t)
                 t.out_path = out
                 if os.path.exists(out) and not cfg.overwrite:
                     t.status = ST_SKIP
@@ -1404,7 +1434,7 @@ class App:
                 messagebox.showinfo(APP_TITLE, "该文件尚未检测完成。")
                 return
             cfg = self._read_cfg_from_ui()
-            cmd = build_cmd(t.info, cfg, resolve_out_path(t.info, cfg))
+            cmd = build_cmd(t.info, cfg, resolve_out_path(t.info, cfg, t))
             win = tk.Toplevel(self.root, bg=C_BG)
             win.title("转码命令 - " + t.info["name"])
             win.geometry("920x400")
@@ -1434,7 +1464,7 @@ class App:
             t = self.tasks.get(iid)
             if t:
                 d = (os.path.dirname(t.out_path) if t.out_path
-                     else os.path.dirname(resolve_out_path(t.info, self._read_cfg_from_ui()) if t.info else t.path))
+                     else os.path.dirname(resolve_out_path(t.info, self._read_cfg_from_ui(), t) if t.info else t.path))
                 if d:
                     os.startfile(d)   # noqa
                 break
