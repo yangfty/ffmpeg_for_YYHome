@@ -234,7 +234,9 @@ def probe_file(ffmpeg_path, path, timeout=120):
         "subs": [(s.get("codec_name", "?"),
                   (s.get("tags", {}) or {}).get("language", "")) for s in subs],
     }
-    info["compliant"] = (info["vcodec"] == "h264" and not is_hdr and depth <= 8)
+    # 已达标=投影可流畅直解：H.264 SDR 8bit，或 HEVC SDR（任意位深，硬解 4K@60）
+    info["compliant"] = ((info["vcodec"] == "h264" and not is_hdr and depth <= 8)
+                         or (info["vcodec"] in ("hevc", "h265") and not is_hdr))
     return info
 
 
