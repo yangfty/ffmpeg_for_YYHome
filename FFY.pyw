@@ -32,7 +32,7 @@ from tkinter.scrolledtext import ScrolledText
 # 常量
 # ----------------------------------------------------------------------------
 APP_TITLE = "FFY · ffmpeg_for_YYHome"
-APP_VER = "V0.1.2"
+APP_VER = "V0.1.3"
 DEFAULT_FFMPEG = r"C:\Installed\FFmpeg\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_config.json")
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_logs")
@@ -98,6 +98,7 @@ class Settings:
     hdr2sdr: bool = True
     tonemap_algo: str = "mobius"
     audio_policy: str = "auto"      # "auto" | "copy_all" | "ac3_all"
+    uhd_policy: str = "smart"       # "smart"(4K HEVC 保留4K) | "h264_1080"(一律降1080p)
     skip_compliant: bool = True
     out_mode: str = "subfolder"     # "subfolder" | "same" | "custom"
     out_subfolder: str = "FFY_输出"
@@ -263,6 +264,25 @@ def hdr_filter_chain(algo):
             "format=yuv420p"]
 
 
+def is_uhd(info):
+    return (info.get("width") or 0) > 1920 or (info.get("height") or 0) > 1080
+
+
+def keep_hevc_4k(info, cfg: Settings):
+    """4K HEVC 片源保留 4K 输出 HEVC（投影 HEVC 硬解 4K@60，体验最佳）"""
+    return (cfg.uhd_policy == "smart" and is_uhd(info)
+            and info.get("vcodec") in ("hevc", "h265"))
+
+
+def audio_all_passthrough(info, cfg: Settings):
+    """全部音轨都无需重编码（直通）时，配合视频已达标可整体跳过"""
+    if cfg.audio_policy == "copy_all":
+        return True
+    if cfg.audio_policy == "ac3_all":
+        return False
+    return all(tr["codec"] in AUDIO_PASSTHROUGH for tr in info["audios"])
+
+
 def build_cmd(info, cfg: Settings, out_path):
     cmd = [cfg.ffmpeg_path, "-hide_banner", "-nostdin", "-y",
            "-loglevel", "warning", "-nostats"]
@@ -286,9 +306,21 @@ def build_cmd(info, cfg: Settings, out_path):
         tag_709 = True
     else:
         filters = ["format=yuv420p"]
+    # 超 1080p 且不保留 4K HEVC 时降到 1080p（投影 H.264 硬解仅 4K@30，会卡）
+    if is_uhd(info) and not keep_hevc_4k(info, cfg):
+        filters = [("scale=-2:1080" if (info.get("height") or 0) > 1080
+                    else "scale=1920:-2")] + filters
     cmd += ["-vf", ",".join(filters)]
 
-    if cfg.encoder == "amf":
+    if keep_hevc_4k(info, cfg):
+        # 4K HEVC 保留：输出 HEVC（投影硬解 4K@60）
+        if cfg.encoder == "amf":
+            cmd += ["-c:v", "hevc_amf", "-quality", "quality", "-rc", "cqp",
+                    "-qp_i", str(int(cfg.qp_i) + 2), "-qp_p", str(int(cfg.qp_p) + 2)]
+        else:
+            cmd += ["-c:v", "libx265", "-preset", cfg.x264_preset,
+                    "-crf", str(int(cfg.crf) + 2)]
+    elif cfg.encoder == "amf":
         cmd += ["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp",
                 "-qp_i", str(int(cfg.qp_i)), "-qp_p", str(int(cfg.qp_p)),
                 "-profile:v", "high"]
@@ -474,11 +506,17 @@ def sub_desc(info):
 def action_desc(info, cfg: Settings):
     if not info:
         return ""
-    if info["compliant"]:
+    if info["compliant"] and audio_all_passthrough(info, cfg):
         return "无需转码" if cfg.skip_compliant else "重转"
+    if keep_hevc_4k(info, cfg):
+        base = "4K HEVC 保留"
+    elif is_uhd(info) and cfg.uhd_policy == "smart":
+        base = "降 1080p"
+    else:
+        base = "转码"
     if info["is_hdr"] and cfg.hdr2sdr:
-        return "HDR→SDR"
-    return "转码"
+        base += " · HDR→SDR"
+    return base
 
 
 # ----------------------------------------------------------------------------
@@ -872,7 +910,18 @@ class App:
         ttk.Label(r3, text="（HDMI ARC 仅支持 DD / DTS / 2.0PCM 直通）",
                   style="Tiny.TLabel", background=C_CARD).pack(side="left", padx=(10, 0))
 
-        r4 = ttk.Frame(self.adv, style="Card.TFrame"); r4.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        r35 = ttk.Frame(self.adv, style="Card.TFrame"); r35.grid(row=4, column=0, columnspan=4, sticky="ew", pady=2)
+        ttk.Label(r35, text="4K 片源", style="CardDim.TLabel").pack(side="left")
+        self.cmb_uhd = ttk.Combobox(r35, state="readonly", width=32, values=[
+            "智能（推荐）HEVC 保留 4K · 其他降 1080p",
+            "一律转 1080p H.264"])
+        self.cmb_uhd.current(0)
+        self.cmb_uhd.pack(side="left", padx=(8, 0))
+        self.cmb_uhd.bind("<<ComboboxSelected>>", lambda e: self._on_advanced_changed())
+        ttk.Label(r35, text="（投影 HEVC 硬解 4K@60 · H.264 仅 4K@30）",
+                  style="Tiny.TLabel", background=C_CARD).pack(side="left", padx=(10, 0))
+
+        r4 = ttk.Frame(self.adv, style="Card.TFrame"); r4.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         ttk.Label(r4, text="输出位置", style="CardDim.TLabel").pack(side="left")
         self.cmb_out = ttk.Combobox(r4, state="readonly", width=18, values=[
             "源目录下的子文件夹", "与源文件同目录", "自定义目录"])
@@ -893,7 +942,7 @@ class App:
 
         # ---- 日志（收纳于高级选项内）----
         lf = ttk.Frame(self.adv, style="Card.TFrame")
-        lf.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        lf.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         lf.columnconfigure(0, weight=1)
         logbar = ttk.Frame(lf, style="Card.TFrame")
         logbar.grid(row=0, column=0, sticky="ew")
@@ -986,6 +1035,7 @@ class App:
         c.hdr2sdr = bool(self.var_hdr.get())
         c.tonemap_algo = self._tm_key()
         c.audio_policy = ("auto", "copy_all", "ac3_all")[self.cmb_audio.current()]
+        c.uhd_policy = ("smart", "h264_1080")[self.cmb_uhd.current()]
         c.skip_compliant = bool(self.var_skip.get())
         c.out_mode = ("subfolder", "same", "custom")[self.cmb_out.current()]
         c.out_subfolder = self.var_subfolder.get().strip() or "FFY_输出"
@@ -1005,6 +1055,7 @@ class App:
         algo = c.tonemap_algo if c.tonemap_algo in TONEMAP_ORDER else "mobius"
         self.var_tm.set("★ %s" % algo if algo in TONEMAP_STARRED else algo)
         self.cmb_audio.current({"auto": 0, "copy_all": 1, "ac3_all": 2}[c.audio_policy])
+        self.cmb_uhd.current(0 if c.uhd_policy == "smart" else 1)
         self.var_skip.set(c.skip_compliant)
         self.cmb_out.current({"subfolder": 0, "same": 1, "custom": 2}[c.out_mode])
         self.var_subfolder.set(c.out_subfolder)
@@ -1222,7 +1273,8 @@ class App:
                         break
                     time.sleep(0.3)
                     continue
-                if cfg.skip_compliant and t.info["compliant"]:
+                if (cfg.skip_compliant and t.info["compliant"]
+                        and audio_all_passthrough(t.info, cfg)):
                     t.status = ST_SKIP
                     t.note = "已达标"
                     self._post_row(t)
