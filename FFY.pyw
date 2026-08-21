@@ -32,7 +32,7 @@ from tkinter.scrolledtext import ScrolledText
 # 常量
 # ----------------------------------------------------------------------------
 APP_TITLE = "FFY · ffmpeg_for_YYHome"
-APP_VER = "V0.1.3"
+APP_VER = "V0.1.4"
 DEFAULT_FFMPEG = r"C:\Installed\FFmpeg\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_config.json")
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_logs")
@@ -234,9 +234,8 @@ def probe_file(ffmpeg_path, path, timeout=120):
         "subs": [(s.get("codec_name", "?"),
                   (s.get("tags", {}) or {}).get("language", "")) for s in subs],
     }
-    # 已达标=投影可流畅直解：H.264 SDR 8bit，或 HEVC SDR（任意位深，硬解 4K@60）
-    info["compliant"] = ((info["vcodec"] == "h264" and not is_hdr and depth <= 8)
-                         or (info["vcodec"] in ("hevc", "h265") and not is_hdr))
+    # 已达标=投影可直解：HEVC/VP9 SDR 任意分辨率；H.264 SDR 仅 1080p 及以下
+    info["compliant"] = video_ok(info)
     return info
 
 
@@ -270,10 +269,23 @@ def is_uhd(info):
     return (info.get("width") or 0) > 1920 or (info.get("height") or 0) > 1080
 
 
-def keep_hevc_4k(info, cfg: Settings):
-    """4K HEVC 片源保留 4K 输出 HEVC（投影 HEVC 硬解 4K@60，体验最佳）"""
-    return (cfg.uhd_policy == "smart" and is_uhd(info)
-            and info.get("vcodec") in ("hevc", "h265"))
+# 投影（MStar 6A938）可直解的视频编码：HEVC/VP9 硬解达 4K@60，H.264 仅 4K@30
+DIRECT_PLAY_CODECS = {"hevc", "h265", "vp9", "h264"}
+
+
+def video_ok(info):
+    """视频流投影可流畅直解：编码受支持且非 HDR（H.264 仅 1080p 及以下流畅，
+    超 1080p 的 H.264 不直拷，走保留 4K 转 HEVC）"""
+    if info.get("is_hdr"):
+        return False
+    if info.get("vcodec") == "h264":
+        return not is_uhd(info)
+    return info.get("vcodec") in DIRECT_PLAY_CODECS
+
+
+def keep_uhd(info, cfg: Settings):
+    """超 1080p 片源保留 4K 输出（智能模式）"""
+    return cfg.uhd_policy == "smart" and is_uhd(info)
 
 
 def audio_all_passthrough(info, cfg: Settings):
@@ -288,9 +300,23 @@ def audio_all_passthrough(info, cfg: Settings):
 def build_cmd(info, cfg: Settings, out_path):
     cmd = [cfg.ffmpeg_path, "-hide_banner", "-nostdin", "-y",
            "-loglevel", "warning", "-nostats"]
+
+    # 场景 A：视频流投影可直解 → 视频直拷，只处理音轨/字幕
+    if video_ok(info):
+        cmd += ["-i", info["path"],
+                "-map", "0:V:0",
+                "-map", "0:a?",
+                "-map", "0:s?",
+                "-map", "0:t?",
+                "-map_chapters", "0",
+                "-map_metadata", "0",
+                "-c:v", "copy"]
+        _append_audio_sub_args(cmd, info, cfg)
+        cmd += ["-c:t", "copy", out_path]
+        return cmd
+
     if cfg.hw_decode:
         cmd += ["-hwaccel", "d3d11va"]
-
     cmd += ["-i", info["path"],
             "-map", "0:V:0",
             "-map", "0:a?",
@@ -308,14 +334,10 @@ def build_cmd(info, cfg: Settings, out_path):
         tag_709 = True
     else:
         filters = ["format=yuv420p"]
-    # 超 1080p 且不保留 4K HEVC 时降到 1080p（投影 H.264 硬解仅 4K@30，会卡）
-    if is_uhd(info) and not keep_hevc_4k(info, cfg):
-        filters = [("scale=-2:1080" if (info.get("height") or 0) > 1080
-                    else "scale=1920:-2")] + filters
     cmd += ["-vf", ",".join(filters)]
 
-    if keep_hevc_4k(info, cfg):
-        # 4K HEVC 保留：输出 HEVC（投影硬解 4K@60）
+    if keep_uhd(info, cfg):
+        # 超 1080p 智能保留 4K：输出 HEVC（投影硬解 4K@60）
         if cfg.encoder == "amf":
             cmd += ["-c:v", "hevc_amf", "-quality", "quality", "-rc", "cqp",
                     "-qp_i", str(int(cfg.qp_i) + 2), "-qp_p", str(int(cfg.qp_p) + 2)]
@@ -333,7 +355,15 @@ def build_cmd(info, cfg: Settings, out_path):
     if tag_709:
         cmd += ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
 
-    # 音频：逐轨自动决策
+    _append_audio_sub_args(cmd, info, cfg)
+    cmd += ["-c:t", "copy",
+            "-progress", "pipe:1",
+            out_path]
+    return cmd
+
+
+def _append_audio_sub_args(cmd, info, cfg: Settings):
+    """音频逐轨决策 + 字幕格式转换（视频直拷与重编共用）"""
     for i, track in enumerate(info["audios"]):
         act, param = audio_track_plan(track, cfg.audio_policy)
         if act == "copy":
@@ -348,10 +378,6 @@ def build_cmd(info, cfg: Settings, out_path):
 
     for i, (codec, _lang) in enumerate(info["subs"]):
         cmd += ["-c:s:%d" % i, ("srt" if codec in SUB_TO_SRT else "copy")]
-
-    cmd += ["-c:t", "copy",
-            "-progress", "pipe:1",
-            out_path]
     return cmd
 
 
@@ -488,7 +514,7 @@ def audio_desc(info, cfg: Settings = None):
     outs = []
     for t in info["audios"]:
         label = audio_track_label(t)
-        if cfg is not None and info.get("compliant") is not None:
+        if cfg is not None:
             act, _p = audio_track_plan(t, cfg.audio_policy if cfg else "auto")
             label += " ✓直通" if act == "copy" else " →AC3"
         outs.append(label)
@@ -508,12 +534,12 @@ def sub_desc(info):
 def action_desc(info, cfg: Settings):
     if not info:
         return ""
-    if info["compliant"] and audio_all_passthrough(info, cfg):
-        return "无需转码" if cfg.skip_compliant else "重转"
-    if keep_hevc_4k(info, cfg):
-        base = "4K HEVC 保留"
-    elif is_uhd(info) and cfg.uhd_policy == "smart":
-        base = "降 1080p"
+    if video_ok(info):
+        if audio_all_passthrough(info, cfg):
+            return "无需转码" if cfg.skip_compliant else "重转"
+        base = "视频直拷 · 只转音轨"
+    elif keep_uhd(info, cfg):
+        base = "4K 保留 · 转 HEVC"
     else:
         base = "转码"
     if info["is_hdr"] and cfg.hdr2sdr:
@@ -915,7 +941,7 @@ class App:
         r35 = ttk.Frame(self.adv, style="Card.TFrame"); r35.grid(row=4, column=0, columnspan=4, sticky="ew", pady=2)
         ttk.Label(r35, text="4K 片源", style="CardDim.TLabel").pack(side="left")
         self.cmb_uhd = ttk.Combobox(r35, state="readonly", width=32, values=[
-            "智能（推荐）HEVC 保留 4K · 其他降 1080p",
+            "智能（推荐）超 1080p 一律保留 4K · 转 HEVC",
             "一律转 1080p H.264"])
         self.cmb_uhd.current(0)
         self.cmb_uhd.pack(side="left", padx=(8, 0))
@@ -1275,7 +1301,7 @@ class App:
                         break
                     time.sleep(0.3)
                     continue
-                if (cfg.skip_compliant and t.info["compliant"]
+                if (cfg.skip_compliant and video_ok(t.info)
                         and audio_all_passthrough(t.info, cfg)):
                     t.status = ST_SKIP
                     t.note = "已达标"
