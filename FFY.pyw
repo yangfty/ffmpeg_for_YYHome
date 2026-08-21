@@ -32,7 +32,7 @@ from tkinter.scrolledtext import ScrolledText
 # 常量
 # ----------------------------------------------------------------------------
 APP_TITLE = "FFY · ffmpeg_for_YYHome"
-APP_VER = "V0.1.4"
+APP_VER = "V0.1.5"
 DEFAULT_FFMPEG = r"C:\Installed\FFmpeg\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_config.json")
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_logs")
@@ -81,6 +81,8 @@ C_ACCENT_P = "#3348C2"    # 按压
 C_OK = "#18A05E"
 C_ERR = "#E5484D"
 C_WARN = "#E7830A"
+
+F = "Microsoft YaHei UI"   # 全局字体
 
 
 # ----------------------------------------------------------------------------
@@ -663,6 +665,43 @@ def pill_badge(parent, text, fg, bg, panel=C_CARD, size=9, height=22):
     return cv
 
 
+class CuteProgress(tk.Canvas):
+    """圆角药丸进度条：与 CuteButton 同风格，居中显示百分比，随窗口伸缩"""
+
+    def __init__(self, master, height=30, bg=C_CARD):
+        super().__init__(master, highlightthickness=0, bd=0, bg=bg)
+        self._h = height
+        self._pct = 0.0
+        self.configure(height=height)
+        self.bind("<Configure>", lambda e: self._redraw())
+
+    def set(self, pct):
+        p = max(0.0, min(100.0, float(pct)))
+        if abs(p - self._pct) >= 0.5 or p in (0.0, 100.0):
+            self._pct = p
+            self._redraw()
+
+    def _redraw(self):
+        self.delete("all")
+        w = self.winfo_width()
+        h = self._h
+        if w < 16:
+            return
+        r = (h - 4) // 2
+        # 轨道
+        _round_rect(self, 1, 2, w - 2, h - 2, r, fill=C_FIELD, outline="")
+        # 填充
+        fw = int((w - 6) * self._pct / 100.0)
+        if fw >= 6:
+            _round_rect(self, 3, 4, 3 + fw, h - 4, min(r, fw / 2),
+                        fill=C_ACCENT, outline="")
+        # 居中百分比：填充过半后文字变白，骑在色带上更清晰
+        over = self._pct >= 52
+        self.create_text(w / 2, h / 2 + 1, text="%d%%" % round(self._pct),
+                         font=(F, 10, "bold"),
+                         fill=("#FFFFFF" if over else C_MUT))
+
+
 # ----------------------------------------------------------------------------
 # 主界面（亮色现代风）
 # ----------------------------------------------------------------------------
@@ -788,8 +827,6 @@ class App:
                         bordercolor=C_CARD, lightcolor=C_CARD, darkcolor=C_CARD,
                         arrowcolor=C_MUT, relief="flat")
         style.map("Horizontal.TScrollbar", background=[("active", "#B7C2D9")])
-        style.configure("TProgressbar", background=C_ACCENT, troughcolor=C_FIELD,
-                        borderwidth=0, thickness=18)
         style.configure("TLabelframe", background=C_CARD, bordercolor=C_BORDER)
         style.configure("TLabelframe.Label", background=C_CARD, foreground=C_MUT,
                         font=(F, 9, "bold"))
@@ -999,8 +1036,8 @@ class App:
                                    command=self.stop_batch)
         self.btn_stop.set_enabled(False)
         self.btn_stop.grid(row=0, column=1, padx=(12, 0))
-        self.overall = ttk.Progressbar(bottom, mode="determinate", length=140)
-        self.overall.grid(row=0, column=2, sticky="ew", padx=18)
+        self.overall = CuteProgress(bottom, height=30)
+        self.overall.grid(row=0, column=2, sticky="ew", padx=(16, 14))
         self.lbl_overall = ttk.Label(bottom, text="就绪 · 共 0 个文件", style="CardDim.TLabel")
         self.lbl_overall.grid(row=0, column=3)
 
@@ -1166,14 +1203,14 @@ class App:
         found.sort()
         if not found:
             self.log_line("扫描完成：未发现视频文件（%s）" % d, "dim")
+            messagebox.showinfo(APP_TITLE, "在所选文件夹中没有找到视频文件：\n%s" % d)
             return
-        # 统一输出目录：所选文件夹的同级位置，如 下载\视频 -> 下载\FFY_输出
+        # 统一输出目录：所选文件夹内部，如 下载 -> 下载\FFY_输出
         cfg = self._read_cfg_from_ui()
         if cfg.out_mode == "custom" and cfg.out_custom:
             out_dir = cfg.out_custom
         else:
-            parent = os.path.dirname(os.path.abspath(d)) or os.path.abspath(d)
-            out_dir = os.path.join(parent, cfg.out_subfolder or "FFY_输出")
+            out_dir = os.path.join(os.path.abspath(d), cfg.out_subfolder or "FFY_输出")
         # 平铺后同名文件加后缀：(2) (3) …
         seen = {}
         dup = 0
@@ -1189,6 +1226,11 @@ class App:
         if dup:
             msg += "（%d 个同名文件已自动加序号后缀）" % dup
         self.log_line(msg, "dim")
+        tip = "已找到 %d 个视频文件，已加入列表。" % len(found)
+        if dup:
+            tip += "\n（%d 个同名文件将自动加序号后缀）" % dup
+        tip += "\n\n转码结果将统一输出到：\n%s" % out_dir
+        messagebox.showinfo(APP_TITLE + " · 扫描完成", tip)
 
     def add_task(self, path, out_dir="", out_suffix=""):
         if any(t.path == path for t in self.tasks.values()):
@@ -1482,7 +1524,7 @@ class App:
         pct = 0.0
         if n:
             pct = sum((100.0 if t.status in (ST_DONE, ST_SKIP) else t.progress) for t in self.tasks.values()) / n
-        self.overall.config(value=pct, maximum=100)
+        self.overall.set(pct)
         extra = ""
         if running and running.speed:
             rem = 0.0
