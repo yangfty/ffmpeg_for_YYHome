@@ -32,7 +32,7 @@ from tkinter.scrolledtext import ScrolledText
 # 常量
 # ----------------------------------------------------------------------------
 APP_TITLE = "FFY · ffmpeg_for_YYHome"
-APP_VER = "V0.1.5"
+APP_VER = "V0.1.6"
 DEFAULT_FFMPEG = r"C:\Installed\FFmpeg\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_config.json")
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_logs")
@@ -430,6 +430,7 @@ class Task:
     info: dict = None
     out_dir: str = ""       # 文件夹批量任务的统一输出目录（空=跟随设置）
     out_suffix: str = ""    # 平铺重名时追加的后缀，如 " (2)"
+    selected: bool = True   # 圆形选择框：是否参与本次转码
     status: str = ST_WAIT_PROBE
     progress: float = 0.0
     speed: str = ""
@@ -475,6 +476,18 @@ def fmt_res(w, h):
     return "%dx%d" % (w, h)
 
 
+def fmt_bitrate(info):
+    """按文件大小和时长估算总码率"""
+    if not info or not info.get("duration") or not info.get("size"):
+        return ""
+    mbps = info["size"] * 8.0 / info["duration"] / 1e6
+    return "%.1f Mbps" % mbps
+
+
+CS_NAMES = {"bt709": "BT.709", "bt2020": "BT.2020", "bt2020nc": "BT.2020",
+            "smpte170m": "BT.601", "bt470bg": "BT.601"}
+
+
 AUDIO_NAMES = {"dts": "DTS", "ac3": "DD 5.1", "eac3": "DD+", "truehd": "TrueHD",
                "flac": "FLAC", "aac": "AAC", "mp3": "MP3", "opus": "Opus",
                "vorbis": "Vorbis", "pcm_s16le": "LPCM", "pcm_s24le": "LPCM",
@@ -491,21 +504,6 @@ def audio_track_label(track):
             name = "DTS " + p.split(" ")[0]
     ch = {1: "2.0", 2: "2.0", 6: "5.1", 8: "7.1"}.get(track["ch"], "%dch" % track["ch"]) if track["ch"] else ""
     return name + ((" " + ch) if ch else "")
-
-
-def video_desc(info):
-    if not info:
-        return "…"
-    codec = {"hevc": "H.265", "h264": "H.264"}.get(info["vcodec"], info["vcodec"].upper())
-    parts = [codec]
-    if info["depth"] > 8:
-        parts.append("%dbit" % info["depth"])
-    if info["is_hdr"]:
-        parts.append(info["hdr_type"])
-    res = fmt_res(info["width"], info["height"])
-    if res:
-        parts.append(res)
-    return " · ".join(parts)
 
 
 def audio_desc(info, cfg: Settings = None):
@@ -834,7 +832,7 @@ class App:
     # ---------------------------------------------------------------- UI
     def _build_ui(self):
         self.root.title("%s %s" % (APP_TITLE, APP_VER))
-        self.root.geometry("1180x740")
+        self.root.geometry("1250x740")
         self.root.minsize(980, 660)
 
         outer = ttk.Frame(self.root, padding=(0, 0))
@@ -872,6 +870,9 @@ class App:
                    bg=C_CARD, command=self.add_files).pack(side="left")
         CuteButton(bar, text="⌕ 扫描文件夹", height=46, bg=C_CARD,
                    command=self.add_folder).pack(side="left", padx=(10, 0))
+        self.btn_selall = CuteButton(bar, text="◉ 全选", height=46, bg=C_CARD,
+                                     command=self.toggle_select_all)
+        self.btn_selall.pack(side="left", padx=(10, 0))
         CuteButton(bar, text="↻ 重新检测", height=46, bg=C_CARD,
                    command=self.reprobe_selected).pack(side="left", padx=(10, 0))
         CuteButton(bar, text="✕ 移除", height=46, bg=C_CARD,
@@ -880,23 +881,28 @@ class App:
                                   command=self.toggle_advanced)
         self.btn_adv.pack(side="right")
 
-        cols = ("status", "progress", "video", "audio", "subs", "dur", "size", "action")
-        texts = {"status": "状态", "progress": "进度", "video": "视频", "audio": "音频（自动决策）",
-                 "subs": "字幕", "dur": "时长", "size": "大小", "action": "动作"}
-        widths = {"status": 110, "progress": 80, "video": 210, "audio": 230,
-                  "subs": 90, "dur": 70, "size": 85, "action": 95}
+        cols = ("sel", "name", "res", "bitrate", "codec", "range", "depth", "cspace",
+                "audio", "subs", "dur", "size", "action", "status", "progress")
+        texts = {"sel": "", "name": "文件名", "res": "分辨率", "bitrate": "码率",
+                 "codec": "编码", "range": "动态范围", "depth": "色深", "cspace": "色彩空间",
+                 "audio": "音频（自动决策）", "subs": "字幕", "dur": "时长", "size": "大小",
+                 "action": "动作", "status": "状态", "progress": "进度"}
+        widths = {"sel": 38, "name": 190, "res": 60, "bitrate": 74, "codec": 54,
+                  "range": 62, "depth": 48, "cspace": 70, "audio": 190, "subs": 70,
+                  "dur": 62, "size": 72, "action": 165, "status": 68, "progress": 54}
+        CENTER = ("sel", "res", "bitrate", "codec", "range", "depth", "cspace",
+                  "dur", "size", "status", "progress")
         wrap = ttk.Frame(main, style="Card.TFrame")
         wrap.grid(row=1, column=0, sticky="nsew")
         wrap.columnconfigure(0, weight=1)
         wrap.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(wrap, columns=cols, show="tree headings",
+        self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
                                  selectmode="extended", style="Treeview")
-        self.tree.heading("#0", text="文件名")
-        self.tree.column("#0", width=300, minwidth=160)
         for c in cols:
             self.tree.heading(c, text=texts[c])
-            self.tree.column(c, width=widths[c], minwidth=50,
-                             anchor="center" if c in ("status", "progress", "dur", "size", "action") else "w")
+            self.tree.column(c, width=widths[c], minwidth=36 if c == "sel" else 46,
+                             anchor="center" if c in CENTER else "w",
+                             stretch=(c == "name"))
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(wrap, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -910,6 +916,10 @@ class App:
         self.tree.tag_configure(ST_ABORT, foreground=C_WARN)
         self.tree.bind("<Button-3>", self._popup_menu)
         self.tree.bind("<Double-1>", lambda e: self.show_cmd())
+        self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", lambda e: self._tip_hide())
+        self._tip = None
 
         # ---- 高级选项（默认隐藏）----
         self.adv = ttk.Frame(outer, style="Card.TFrame", padding=(16, 12))
@@ -1196,14 +1206,14 @@ class App:
                 if os.path.splitext(fn)[1].lower() in VIDEO_EXTS and not fn.startswith((".", "._")):
                     p = os.path.join(dirpath, fn)
                     try:
-                        if os.path.getsize(p) >= 20 * 1024 * 1024:
+                        if os.path.getsize(p) >= 5 * 1024 * 1024:
                             found.append(p)
                     except OSError:
                         pass
         found.sort()
         if not found:
             self.log_line("扫描完成：未发现视频文件（%s）" % d, "dim")
-            messagebox.showinfo(APP_TITLE, "在所选文件夹中没有找到视频文件：\n%s" % d)
+            messagebox.showinfo(APP_TITLE, "在所选文件夹（含所有子文件夹）中没有找到视频文件：\n%s\n\n仅识别 5MB 以上的常见视频格式。" % d)
             return
         # 统一输出目录：所选文件夹内部，如 下载 -> 下载\FFY_输出
         cfg = self._read_cfg_from_ui()
@@ -1222,13 +1232,14 @@ class App:
                 dup += 1
             self.add_task(p, out_dir=out_dir,
                           out_suffix=(" (%d)" % n) if n > 1 else "")
-        msg = "扫描完成：%s（%d 个视频文件）→ 统一输出到 %s" % (d, len(found), out_dir)
+        msg = "扫描完成：%s（%d 个视频文件，含所有子文件夹）→ 统一输出到 %s" % (d, len(found), out_dir)
         if dup:
             msg += "（%d 个同名文件已自动加序号后缀）" % dup
         self.log_line(msg, "dim")
-        tip = "已找到 %d 个视频文件，已加入列表。" % len(found)
+        tip = "已扫描所有子文件夹，找到 %d 个视频文件，已加入列表。" % len(found)
         if dup:
             tip += "\n（%d 个同名文件将自动加序号后缀）" % dup
+        tip += "\n需要转码的文件已自动勾选，已达标的未勾选。"
         tip += "\n\n转码结果将统一输出到：\n%s" % out_dir
         messagebox.showinfo(APP_TITLE + " · 扫描完成", tip)
 
@@ -1239,8 +1250,9 @@ class App:
         iid = str(self.iid_seq)
         t = Task(iid=iid, path=path, out_dir=out_dir, out_suffix=out_suffix)
         self.tasks[iid] = t
-        self.tree.insert("", "end", iid=iid, text=os.path.basename(path),
-                         values=(ST_WAIT_PROBE, "", "…", "…", "…", "", "", ""))
+        self.tree.insert("", "end", iid=iid,
+                         values=("●", os.path.basename(path), "", "", "", "", "", "",
+                                 "…", "…", "", "", "", ST_WAIT_PROBE, ""))
         self._update_overall()
         self._probe_async(t)
 
@@ -1251,6 +1263,7 @@ class App:
             self.tree.delete(iid)
             self.tasks.pop(iid, None)
         self._update_overall()
+        self._update_selall_button()
 
     def clear_all(self):
         if any(t.status == ST_RUNNING for t in self.tasks.values()):
@@ -1277,6 +1290,7 @@ class App:
                 t.reset()
                 self._refresh_row(t)
         self._update_overall()
+        self._update_selall_button()
 
     # ------------------------------------------------------------ 探测
     def _probe_async(self, t: Task):
@@ -1305,6 +1319,9 @@ class App:
             return
         if self.batch_running:
             return
+        if not any(t.selected for t in self.tasks.values()):
+            messagebox.showinfo(APP_TITLE, "没有勾选任何文件。\n\n请点击文件列表最前面的圆形按钮勾选需要转码的影片。")
+            return
         self.stop_flag = False
         self.batch_running = True
         self._open_log_file()
@@ -1330,7 +1347,7 @@ class App:
     def _next_task(self):
         for iid in self.tree.get_children(""):
             t = self.tasks.get(iid)
-            if t and t.status == ST_READY and t.info:
+            if t and t.selected and t.status == ST_READY and t.info:
                 return t
         return None
 
@@ -1464,7 +1481,13 @@ class App:
                     if t:
                         t.info = b
                         t.status = ST_READY
+                        # 自动勾选：需要转码的默认选中，已达标的默认不选
+                        cfg_now = self._read_cfg_from_ui()
+                        would_skip = (cfg_now.skip_compliant and video_ok(b)
+                                      and audio_all_passthrough(b, cfg_now))
+                        t.selected = not would_skip
                         self._refresh_row(t)
+                        self._update_selall_button()
                 elif kind == "probe_fail":
                     t = self.tasks.get(a)
                     if t:
@@ -1482,8 +1505,12 @@ class App:
                     self.btn_start.set_enabled(True)
                     self.btn_stop.set_enabled(False)
                     self._close_log_file()
+                    unselected = sum(1 for t in self.tasks.values()
+                                     if not t.selected and t.status in (ST_READY, ST_WAIT_PROBE, ST_PROBING))
                     if not self.stop_flag:
                         self.log_line("===== 全部任务结束 =====", "ok")
+                        if unselected:
+                            self.log_line("提示：%d 个文件未勾选，未参与转码" % unselected, "dim")
                         self.root.bell()
                     else:
                         self.log_line("===== 已停止 =====", "err")
@@ -1500,25 +1527,122 @@ class App:
 
     def _refresh_row(self, t: Task):
         cfg = self.cfg
+        info = t.info
         vals = {
+            "sel": "●" if t.selected else "○",
+            "name": (info["name"] if info else os.path.basename(t.path)),
+            "res": (fmt_res(info["width"], info["height"]) or "—") if info else "…",
+            "bitrate": fmt_bitrate(info) if info else "",
+            "codec": ({"hevc": "H.265", "h264": "H.264"}.get(info["vcodec"],
+                      info["vcodec"].upper())) if info else "…",
+            "range": (info["hdr_type"] if info["is_hdr"] else "SDR") if info else "…",
+            "depth": ("%d bit" % info["depth"]) if info else "…",
+            "cspace": (CS_NAMES.get(info["primaries"], info["primaries"] or "—")) if info else "…",
+            "audio": audio_desc(info, cfg),
+            "subs": sub_desc(info),
+            "dur": fmt_duration(info["duration"]) if info else "",
+            "size": (fmt_size(t.out_size) if t.status == ST_DONE and t.out_size
+                     else fmt_size(info["size"]) if info else ""),
+            "action": (t.note or action_desc(info, cfg)) if t.status in (ST_SKIP, ST_FAIL)
+                      else action_desc(info, cfg),
             "status": t.status,
             "progress": ("%.0f%%" % t.progress) if t.status == ST_RUNNING else (
                 "100%" if t.status == ST_DONE and t.progress >= 100 else ""),
-            "video": video_desc(t.info),
-            "audio": audio_desc(t.info, cfg),
-            "subs": sub_desc(t.info),
-            "dur": fmt_duration(t.info["duration"]) if t.info else "",
-            "size": (fmt_size(t.out_size) if t.status == ST_DONE and t.out_size
-                     else fmt_size(t.info["size"]) if t.info else ""),
-            "action": (t.note or action_desc(t.info, cfg)) if t.status in (ST_SKIP, ST_FAIL)
-                      else action_desc(t.info, cfg),
         }
         self.tree.item(t.iid, values=tuple(vals[c] for c in
-                        ("status", "progress", "video", "audio", "subs", "dur", "size", "action")),
+                        ("sel", "name", "res", "bitrate", "codec", "range", "depth", "cspace",
+                         "audio", "subs", "dur", "size", "action", "status", "progress")),
                        tags=(t.status,))
+
+    # ------------------------------------------------------------ 选择与悬停提示
+    def _on_tree_click(self, event):
+        """点击最前面的圆形选择框：切换该行是否参与转码"""
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return
+        if self.tree.identify_column(event.x) != "#1":
+            return
+        iid = self.tree.identify_row(event.y)
+        t = self.tasks.get(iid)
+        if t and t.status != ST_RUNNING:
+            t.selected = not t.selected
+            self._refresh_row(t)
+            self._update_selall_button()
+        return "break"
+
+    def toggle_select_all(self):
+        ts = [t for t in self.tasks.values() if t.status != ST_RUNNING]
+        if not ts:
+            return
+        all_sel = all(t.selected for t in ts)
+        for t in ts:
+            t.selected = not all_sel
+            self._refresh_row(t)
+        self._update_selall_button()
+        self._update_overall()
+
+    def _update_selall_button(self):
+        ts = [t for t in self.tasks.values() if t.status != ST_RUNNING]
+        all_sel = bool(ts) and all(t.selected for t in ts)
+        self.btn_selall.set_text("○ 取消全选" if all_sel else "◉ 全选")
+
+    def _on_tree_motion(self, event):
+        """鼠标悬停显示单元格完整内容（文件名列显示完整路径）"""
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            self._tip_hide()
+            return
+        iid = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
+        if not iid or not col:
+            self._tip_hide()
+            return
+        try:
+            idx = int(col[1:]) - 1
+        except ValueError:
+            self._tip_hide()
+            return
+        t = self.tasks.get(iid)
+        if idx == 0:  # 选择框列
+            self._tip_hide()
+            return
+        if t and idx == 1:  # 文件名列 → 完整路径
+            text = t.path
+        else:
+            try:
+                text = str(self.tree.set(iid, self.tree.column(col, "id")) or "")
+            except tk.TclError:
+                self._tip_hide()
+                return
+        if not text:
+            self._tip_hide()
+            return
+        self._tip_show(text, event.x_root, event.y_root)
+
+    def _tip_show(self, text, x, y):
+        if self._tip is None:
+            self._tip = tk.Toplevel(self.root)
+            self._tip.overrideredirect(True)
+            self._tip.attributes("-topmost", True)
+            self._tip_lbl = tk.Label(self._tip, text=text, justify="left",
+                                     bg="#2A3142", fg="#FFFFFF", padx=10, pady=6,
+                                     font=(F, 9), wraplength=480)
+            self._tip_lbl.pack()
+        else:
+            self._tip_lbl.config(text=text)
+        self._tip.update_idletasks()
+        w, h = self._tip.winfo_reqwidth(), self._tip.winfo_reqheight()
+        sx, sy = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        px = min(x + 14, sx - w - 8)
+        py = min(y + 12, sy - h - 8)
+        self._tip.wm_geometry("+%d+%d" % (px, py))
+
+    def _tip_hide(self):
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
 
     def _update_overall(self):
         n = len(self.tasks)
+        n_sel = sum(1 for t in self.tasks.values() if t.selected)
         done = sum(1 for t in self.tasks.values() if t.status in (ST_DONE, ST_SKIP, ST_FAIL, ST_ABORT))
         running = next((t for t in self.tasks.values() if t.status == ST_RUNNING), None)
         pct = 0.0
@@ -1531,13 +1655,15 @@ class App:
             try:
                 fac = float(running.speed.rstrip("x")) or 1.0
                 for t in self.tasks.values():
-                    if t.status in (ST_READY, ST_RUNNING) and t.info:
+                    if t.selected and t.status in (ST_READY, ST_RUNNING) and t.info:
                         rem += t.info["duration"] * (1 - t.progress / 100.0)
                 if rem > 0:
                     extra = " · 剩余约 %s" % fmt_duration(rem / fac)
             except (ValueError, ZeroDivisionError):
                 pass
-        self.lbl_overall.config(text=("%d/%d 完成%s" % (done, n, extra)) if n else "就绪 · 共 0 个文件")
+        self.lbl_overall.config(
+            text=("%d/%d 完成 · 已选 %d%s" % (done, n, n_sel, extra)) if n
+            else "就绪 · 共 0 个文件")
 
     # ------------------------------------------------------------ 菜单/其他
     def _popup_menu(self, event):
