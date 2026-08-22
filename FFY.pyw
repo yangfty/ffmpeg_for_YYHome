@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-FFY · ffmpeg_for_YYHome 影片批量转码工具 · V0.1.0
+FFY · ffmpeg_for_YYHome 影片批量转码工具 · V0.1.9
 ==================================================
 适配目标（当贝 New F3 投影 1080p SDR + 索尼 HT-NT5 回音壁，HDMI ARC 连接）：
   容器    : MKV
@@ -32,7 +32,7 @@ from tkinter.scrolledtext import ScrolledText
 # 常量
 # ----------------------------------------------------------------------------
 APP_TITLE = "FFY · ffmpeg_for_YYHome"
-APP_VER = "V0.1.7"
+APP_VER = "V0.1.9"
 DEFAULT_FFMPEG = r"C:\Installed\FFmpeg\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_config.json")
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_logs")
@@ -492,6 +492,17 @@ def fmt_bitrate(info):
     return "%.1f Mbps" % mbps
 
 
+def video_spec_desc(info):
+    """视频规格一行式描述：编码 · 动态范围 · 色深 · 色彩空间（合并 4 列，避免过碎）"""
+    if not info:
+        return "…"
+    codec = {"hevc": "H.265", "h264": "H.264"}.get(info["vcodec"], info["vcodec"].upper())
+    rng = info["hdr_type"] if info["is_hdr"] else "SDR"
+    depth = "%dbit" % info["depth"]
+    cspace = CS_NAMES.get(info["primaries"], info["primaries"] or "—")
+    return " · ".join((codec, rng, depth, cspace))
+
+
 CS_NAMES = {"bt709": "BT.709", "bt2020": "BT.2020", "bt2020nc": "BT.2020",
             "smpte170m": "BT.601", "bt470bg": "BT.601"}
 
@@ -601,6 +612,12 @@ class CuteButton(tk.Canvas):
         self.configure(width=self._bw, height=self._h + 5)
         self._redraw()
 
+    def set_kind(self, kind_name):
+        """切换按钮配色（soft/primary/danger），用于"展开→收起"状态切换"""
+        if kind_name in BTN_KINDS:
+            self._kind = BTN_KINDS[kind_name]
+            self._redraw()
+
     def set_enabled(self, on):
         self._enabled = bool(on)
         self._state = self._NORMAL
@@ -683,6 +700,35 @@ def make_circle_img(size, fill, ring):
                 img.put(fill, (x, y))
             elif d <= r:
                 img.put(ring, (x, y))
+    return img
+
+
+def make_concentric_circle_img(size, outer, inner_ring, core, core_radius_ratio=0.38):
+    """
+    同心圆样式复选框勾选图（用于 Checkbutton 选中态）：
+      - 最外层：outer 色圆环（1px 宽）
+      - 中间：inner_ring 色的白色环带（空白区域，形成"按钮"观感）
+      - 最中心：core 色小圆芯（表示勾选）
+    core_radius_ratio：小圆芯半径 / 外半径（默认约 38% ≈ 16px 直径中 6px 芯）
+    """
+    img = tk.PhotoImage(width=size, height=size)
+    c = (size - 1) / 2.0
+    r_out = size / 2.0 - 1.0          # 外半径（= 最外圈边界）
+    r_border_outer = r_out            # 外边界
+    r_border_inner = r_out - 1.2      # 外环 内边界（边框厚度约 1.2px）
+    r_core = max(1.2, r_out * core_radius_ratio)  # 中心小圆芯外半径
+    for y in range(size):
+        for x in range(size):
+            d = ((x - c) ** 2 + (y - c) ** 2) ** 0.5
+            if d <= r_core:
+                # 中心小圆芯
+                img.put(core, (x, y))
+            elif d <= r_border_inner:
+                # 中间环带（"白色空白"）
+                img.put(inner_ring, (x, y))
+            elif d <= r_border_outer:
+                # 最外环
+                img.put(outer, (x, y))
     return img
 
 
@@ -800,14 +846,57 @@ class App:
                   bordercolor=[("pressed", C_ACCENT), ("active", C_ACCENT)],
                   foreground=[("disabled", C_DIM)])
 
+        # ---- 自定义圆圈复选框：未选=灰色圆环；选中=同心圆（深紫外环+空白环带+主色小圆芯）----
+        # 保存为实例属性，避免被 GC 回收
+        self._cb_off = make_circle_img(16, "#FFFFFF", "#B8C0D2")     # 未选：灰色空心圆环
+        self._cb_on = make_concentric_circle_img(16,                 # 选中：同心圆
+                                                  outer=C_ACCENT_P,  # 最外环：深紫描边
+                                                  inner_ring="#FFFFFF",  # 中间空白
+                                                  core=C_ACCENT,     # 中心小圆芯：主色填充
+                                                  core_radius_ratio=0.38)
+        # element_create 不允许重复注册，因此 try-except 包住元素创建；布局/样式始终重设
+        try:
+            style.element_create("circleCheck.indicator", "image", self._cb_off,
+                                 ("!disabled", "selected", self._cb_on),
+                                 ("active", "!selected", self._cb_off),
+                                 ("disabled", "!selected", self._cb_off),
+                                 ("disabled", "selected", self._cb_on),
+                                 border=1, sticky="w")
+        except tk.TclError:
+            pass
+        try:
+            style.element_create("circleCheckCard.indicator", "image", self._cb_off,
+                                 ("!disabled", "selected", self._cb_on),
+                                 ("active", "!selected", self._cb_off),
+                                 ("disabled", "!selected", self._cb_off),
+                                 ("disabled", "selected", self._cb_on),
+                                 border=1, sticky="w")
+        except tk.TclError:
+            pass
+        # TCheckbutton：圆圈版布局（indicator 放在 label 左侧）
+        style.layout("TCheckbutton", [
+            ("Checkbutton.padding", {"side": "left", "sticky": "ns", "children": [
+                ("circleCheck.indicator", {"side": "left", "sticky": ""}),
+            ]}),
+            ("Checkbutton.focus", {"side": "left", "sticky": "ns", "children": [
+                ("Checkbutton.label", {"sticky": "nswe"}),
+            ]}),
+        ])
+        # Card.TCheckbutton：使用相同 indicator，背景不同
+        style.layout("Card.TCheckbutton", [
+            ("Card.TCheckbutton.padding", {"side": "left", "sticky": "ns", "children": [
+                ("circleCheckCard.indicator", {"side": "left", "sticky": ""}),
+            ]}),
+            ("Card.TCheckbutton.focus", {"side": "left", "sticky": "ns", "children": [
+                ("Card.TCheckbutton.label", {"sticky": "nswe"}),
+            ]}),
+        ])
         style.configure("TCheckbutton", background=C_BG, foreground=C_TEXT,
-                        focuscolor=C_BG, font=(F, 10))
-        style.map("TCheckbutton", background=[("active", C_BG)],
-                  indicatorcolor=[("selected", C_ACCENT), ("!selected", "#FFFFFF")])
+                        focuscolor=C_BG, font=(F, 10), padding=(0, 2))
+        style.map("TCheckbutton", background=[("active", C_BG)])
         style.configure("Card.TCheckbutton", background=C_CARD, foreground=C_TEXT,
-                        focuscolor=C_CARD, font=(F, 10))
-        style.map("Card.TCheckbutton", background=[("active", C_CARD)],
-                  indicatorcolor=[("selected", C_ACCENT), ("!selected", "#FFFFFF")])
+                        focuscolor=C_CARD, font=(F, 10), padding=(0, 2))
+        style.map("Card.TCheckbutton", background=[("active", C_CARD)])
 
         style.configure("TCombobox", fieldbackground=C_CARD, background=C_CARD,
                         foreground=C_TEXT, arrowcolor=C_MUT, bordercolor=C_BORDER,
@@ -832,7 +921,7 @@ class App:
                   background=[("active", C_HOVER)])
 
         style.configure("Treeview", background=C_CARD, foreground=C_TEXT,
-                        fieldbackground=C_CARD, rowheight=34, borderwidth=0,
+                        fieldbackground=C_CARD, rowheight=36, borderwidth=0,
                         font=(F, 10))
         style.configure("Treeview.Heading", background="#F5F7FB", foreground=C_MUT,
                         borderwidth=0, relief="flat", font=(F, 9, "bold"), padding=(8, 8))
@@ -863,21 +952,24 @@ class App:
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(2, weight=1)
 
-        # ---- 顶部标题栏 ----
-        header = ttk.Frame(outer, style="Card.TFrame", padding=(20, 14))
+        # ---- 顶部标题栏（瘦身：静态冗长说明换为动态状态提示；padding 压缩）----
+        header = ttk.Frame(outer, style="Card.TFrame", padding=(20, 10))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(2, weight=1)
         ttk.Label(header, text="FFY", style="Card.TLabel",
-                  font=("Microsoft YaHei UI", 20, "bold"), foreground=C_ACCENT
+                  font=("Microsoft YaHei UI", 18, "bold"), foreground=C_ACCENT
                   ).grid(row=0, column=0, sticky="w")
         pill_badge(header, APP_VER, fg=C_ACCENT, bg="#E8EDFE",
-                   panel=C_CARD).grid(row=0, column=1, sticky="ws", padx=(10, 0), pady=(7, 0))
+                   panel=C_CARD, height=20).grid(row=0, column=1, sticky="ws", padx=(10, 0), pady=(6, 0))
         ttk.Label(header, text="ffmpeg_for_YYHome · 影片自动转码", style="CardDim.TLabel",
                   font=("Microsoft YaHei UI", 10)
-                  ).grid(row=0, column=2, sticky="ws", padx=(12, 0), pady=(4, 0))
-        ttk.Label(header,
-                  text="自动输出：MKV · H.264 · BT.709 SDR · DTS/AC3 直通 · 其余音频转 AC3 5.1",
-                  style="CardDim.TLabel").grid(row=1, column=2, sticky="w", padx=(12, 0))
+                  ).grid(row=0, column=2, sticky="ws", padx=(12, 0), pady=(3, 0))
+        # 动态状态：与当前运行阶段联动（就绪/检测中/转码中/已选X个/停止中/完成…）
+        self.header_status = ttk.Label(header, text="就绪 — 添加影片或扫描文件夹即可开始",
+                                       style="CardDim.TLabel",
+                                       font=("Microsoft YaHei UI", 9))
+        self.header_status.grid(row=1, column=2, sticky="w", padx=(12, 0), pady=(2, 0))
+        # ffmpeg 路径不再放在顶栏（移入高级选项），此位置保留空白
         self.lbl_ff = ttk.Label(header, text="", style="CardDim.TLabel")
         self.lbl_ff.grid(row=0, column=3, rowspan=2, sticky="e")
 
@@ -889,14 +981,18 @@ class App:
 
         bar = ttk.Frame(main, style="Card.TFrame")
         bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        CuteButton(bar, text="＋ 添加影片", kind="primary", height=46, size=12,
-                   bg=C_CARD, command=self.add_files).pack(side="left")
-        CuteButton(bar, text="⌕ 扫描文件夹", height=46, bg=C_CARD,
-                   command=self.add_folder).pack(side="left", padx=(10, 0))
-        CuteButton(bar, text="↻ 重新检测", height=46, bg=C_CARD,
-                   command=self.reprobe_selected).pack(side="left", padx=(10, 0))
-        CuteButton(bar, text="✕ 移除", height=46, bg=C_CARD,
-                   command=self.remove_selected).pack(side="left", padx=(10, 0))
+        self.btn_add = CuteButton(bar, text="＋ 添加影片", kind="primary", height=46, size=12,
+                                  bg=C_CARD, command=self.add_files)
+        self.btn_add.pack(side="left")
+        self.btn_scan = CuteButton(bar, text="⌕ 扫描文件夹", height=46, bg=C_CARD,
+                                   command=self.add_folder)
+        self.btn_scan.pack(side="left", padx=(10, 0))
+        self.btn_reprobe = CuteButton(bar, text="↻ 重新检测", height=46, bg=C_CARD,
+                                      command=self.reprobe_selected)
+        self.btn_reprobe.pack(side="left", padx=(10, 0))
+        self.btn_remove = CuteButton(bar, text="✕ 移除", height=46, bg=C_CARD,
+                                     command=self.remove_selected)
+        self.btn_remove.pack(side="left", padx=(10, 0))
         self.btn_adv = CuteButton(bar, text="⚙ 高级选项", height=46, bg=C_CARD,
                                   command=self.toggle_advanced)
         self.btn_adv.pack(side="right")
@@ -904,32 +1000,36 @@ class App:
         # 第二行：选择操作（小按钮，与导入操作区分）
         bar2 = ttk.Frame(main, style="Card.TFrame")
         bar2.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        self._bar2 = bar2
         self.btn_selall = CuteButton(bar2, text="◉ 全选", height=34, size=10, padx=16,
                                      bg=C_CARD, command=self.toggle_select_all)
         self.btn_selall.pack(side="left")
-        CuteButton(bar2, text="✦ 智能选择", height=34, size=10, padx=16, bg=C_CARD,
-                   command=self.smart_select_all).pack(side="left", padx=(8, 0))
-        ttk.Label(bar2, text="智能选择＝只勾选需要转码的文件",
-                  style="Tiny.TLabel", background=C_CARD).pack(side="left", padx=(10, 2))
+        self.btn_smart = CuteButton(bar2, text="✦ 智能选择", height=34, size=10, padx=16, bg=C_CARD,
+                                    command=self.smart_select_all)
+        self.btn_smart.pack(side="left", padx=(8, 0))
+        self._bar2_tip = ttk.Label(bar2, text="智能选择＝只勾选需要转码的文件",
+                                   style="Tiny.TLabel", background=C_CARD)
+        self._bar2_tip.pack(side="left", padx=(10, 2))
 
-        cols = ("name", "res", "bitrate", "codec", "range", "depth", "cspace",
-                "audio", "subs", "dur", "size", "action", "status", "progress")
-        texts = {"name": "文件名", "res": "分辨率", "bitrate": "码率",
-                 "codec": "编码", "range": "动态范围", "depth": "色深", "cspace": "色彩空间",
-                 "audio": "音频（自动决策）", "subs": "字幕", "dur": "时长", "size": "大小",
-                 "action": "动作", "status": "状态", "progress": "进度"}
-        widths = {"name": 190, "res": 60, "bitrate": 74, "codec": 54,
-                  "range": 62, "depth": 48, "cspace": 70, "audio": 190, "subs": 70,
-                  "dur": 62, "size": 72, "action": 165, "status": 68, "progress": 54}
-        CENTER = ("res", "bitrate", "codec", "range", "depth", "cspace",
-                  "dur", "size", "status", "progress")
+        cols = ("name", "res", "spec", "bitrate", "audio", "subs",
+                "dur", "size", "action", "status", "progress")
+        texts = {"name": "文件名", "res": "分辨率", "spec": "视频规格（编码·范围·色深·色彩）",
+                 "bitrate": "码率", "audio": "音频（自动决策）", "subs": "字幕",
+                 "dur": "时长", "size": "大小", "action": "动作",
+                 "status": "状态", "progress": "进度"}
+        widths = {"name": 205, "res": 58, "spec": 195, "bitrate": 76,
+                  "audio": 205, "subs": 62, "dur": 64, "size": 76,
+                  "action": 150, "status": 62, "progress": 54}
+        CENTER = ("res", "bitrate", "subs", "dur", "size",
+                  "status", "progress")
         wrap = ttk.Frame(main, style="Card.TFrame")
         wrap.grid(row=2, column=0, sticky="nsew")
         wrap.columnconfigure(0, weight=1)
         wrap.rowconfigure(0, weight=1)
-        # 大号圆形勾选图标（选中=主色实心，未选=灰色圆环）
-        self.img_sel = make_circle_img(18, C_ACCENT, C_ACCENT_P)
-        self.img_unsel = make_circle_img(18, "#FFFFFF", "#C9D2E4")
+        # 大号圆形勾选图标（与高级选项 Checkbutton 风格统一的立体同心圆：选中=深紫外环+白环+主色小圆芯；未选=灰色空心圆环。尺寸略大一点：20px）
+        self.img_sel = make_concentric_circle_img(20, outer=C_ACCENT_P, inner_ring="#FFFFFF",
+                                                  core=C_ACCENT, core_radius_ratio=0.38)
+        self.img_unsel = make_circle_img(20, "#FFFFFF", "#C9D2E4")
         self.tree = ttk.Treeview(wrap, columns=cols, show="tree headings",
                                  selectmode="extended", style="Treeview")
         self.tree.heading("#0", text="")
@@ -989,14 +1089,20 @@ class App:
             sb.bind("<KeyRelease>", lambda e: self._on_advanced_changed())
         self.sp_crf.bind("<KeyRelease>", lambda e: self._on_advanced_changed())
         self.cmb_preset.bind("<<ComboboxSelected>>", lambda e: self._on_advanced_changed())
-        # 第一行末项：ffmpeg 路径（明显的按钮，与前面保持一段距离）
-        ttk.Frame(r1, width=60, style="Card.TFrame").pack(side="left", fill="x")
-        self.btn_ffmpeg = CuteButton(r1, text="📂 ffmpeg 路径…", kind="soft",
-                                     height=36, size=10, padx=20, bg=C_CARD,
-                                     command=self.pick_ffmpeg)
-        self.btn_ffmpeg.pack(side="right")
 
-        r2 = ttk.Frame(self.adv, style="Card.TFrame"); r2.grid(row=2, column=0, columnspan=4, sticky="ew", pady=2)
+        # 单独一行：ffmpeg 路径（标签 + 左侧按钮 + 当前路径显示）
+        r_ff = ttk.Frame(self.adv, style="Card.TFrame"); r_ff.grid(row=2, column=0, columnspan=4, sticky="ew", pady=2)
+        ttk.Label(r_ff, text="ffmpeg 路径", style="CardDim.TLabel").pack(side="left")
+        self.btn_ffmpeg = CuteButton(r_ff, text="📂 选择…", kind="soft",
+                                     height=32, size=10, padx=18, bg=C_CARD,
+                                     command=self.pick_ffmpeg)
+        self.btn_ffmpeg.pack(side="left", padx=(8, 12))
+        # 路径显示：绿色✓或红色✗前缀，后面长路径用省略号
+        self.ff_path_label = ttk.Label(r_ff, text="", style="CardDim.TLabel",
+                                       font=("Consolas", 9))
+        self.ff_path_label.pack(side="left")
+
+        r2 = ttk.Frame(self.adv, style="Card.TFrame"); r2.grid(row=3, column=0, columnspan=4, sticky="ew", pady=2)
         self.var_hwdec = tk.BooleanVar(value=True)
         ttk.Checkbutton(r2, text="硬件解码 (d3d11va)", style="Card.TCheckbutton",
                         variable=self.var_hwdec, command=self._on_advanced_changed).pack(side="left")
@@ -1015,7 +1121,7 @@ class App:
         ttk.Checkbutton(r2, text="跳过已是目标格式的文件", style="Card.TCheckbutton",
                         variable=self.var_skip, command=self._on_advanced_changed).pack(side="left")
 
-        r3 = ttk.Frame(self.adv, style="Card.TFrame"); r3.grid(row=3, column=0, columnspan=4, sticky="ew", pady=2)
+        r3 = ttk.Frame(self.adv, style="Card.TFrame"); r3.grid(row=4, column=0, columnspan=4, sticky="ew", pady=2)
         ttk.Label(r3, text="音频策略", style="CardDim.TLabel").pack(side="left")
         self.cmb_audio = ttk.Combobox(r3, state="readonly", width=34, values=[
             "自动（推荐）DTS/AC3 直通 · 其余转 AC3 5.1",
@@ -1027,7 +1133,7 @@ class App:
         ttk.Label(r3, text="（HDMI ARC 仅支持 DD / DTS / 2.0PCM 直通）",
                   style="Tiny.TLabel", background=C_CARD).pack(side="left", padx=(10, 0))
 
-        r35 = ttk.Frame(self.adv, style="Card.TFrame"); r35.grid(row=4, column=0, columnspan=4, sticky="ew", pady=2)
+        r35 = ttk.Frame(self.adv, style="Card.TFrame"); r35.grid(row=5, column=0, columnspan=4, sticky="ew", pady=2)
         ttk.Label(r35, text="4K 片源", style="CardDim.TLabel").pack(side="left")
         self.cmb_uhd = ttk.Combobox(r35, state="readonly", width=32, values=[
             "智能（推荐）超 1080p 一律保留 4K · 转 HEVC",
@@ -1038,7 +1144,7 @@ class App:
         ttk.Label(r35, text="（投影 HEVC 硬解 4K@60 · H.264 仅 4K@30）",
                   style="Tiny.TLabel", background=C_CARD).pack(side="left", padx=(10, 0))
 
-        r4 = ttk.Frame(self.adv, style="Card.TFrame"); r4.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        r4 = ttk.Frame(self.adv, style="Card.TFrame"); r4.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         ttk.Label(r4, text="输出位置", style="CardDim.TLabel").pack(side="left")
         self.cmb_out = ttk.Combobox(r4, state="readonly", width=18, values=[
             "源目录下的子文件夹", "与源文件同目录", "自定义目录"])
@@ -1055,7 +1161,7 @@ class App:
         self.ck_over = ttk.Checkbutton(r4, text="覆盖已存在输出", style="Card.TCheckbutton",
                                        variable=self.var_overwrite, command=self._on_advanced_changed)
 
-        r45 = ttk.Frame(self.adv, style="Card.TFrame"); r45.grid(row=55, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        r45 = ttk.Frame(self.adv, style="Card.TFrame"); r45.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Label(r45, text="文件命名", style="CardDim.TLabel").pack(side="left")
         self.var_prefix = tk.StringVar(value="FFY_")
         tk.Label(r45, text="前缀", fg=C_MUT, bg=C_CARD, font=(F, 10)).pack(side="left", padx=(8, 4))
@@ -1073,23 +1179,17 @@ class App:
             if isinstance(en, ttk.Entry):
                 en.bind("<KeyRelease>", lambda e: self._on_advanced_changed())
 
-        # 底部右侧：明显的收起按钮（与左上「高级选项」同一切换）
-        rb = ttk.Frame(self.adv, style="Card.TFrame")
-        rb.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(10, 0))
-        CuteButton(rb, text="▲ 收起高级选项", kind="primary", height=36, size=11,
-                   bg=C_CARD, command=self.toggle_advanced).pack(side="right")
-
-        # ---- 日志（收纳于高级选项内）----
+        # ---- 日志（收纳于高级选项内；底部不再放置收起按钮，给日志留出更大区域）----
         lf = ttk.Frame(self.adv, style="Card.TFrame")
-        lf.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        lf.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         lf.columnconfigure(0, weight=1)
         logbar = ttk.Frame(lf, style="Card.TFrame")
         logbar.grid(row=0, column=0, sticky="ew")
         ttk.Label(logbar, text="运行日志", style="CardDim.TLabel",
                   font=("Microsoft YaHei UI", 9, "bold")).pack(side="left")
-        ttk.Label(logbar, text="完整日志同时保存在 FFY_logs 文件夹", style="Tiny.TLabel",
-                  background=C_CARD).pack(side="left", padx=(10, 0))
-        self.log = ScrolledText(lf, height=6, state="disabled", font=("Consolas", 9),
+        ttk.Label(logbar, text="完整日志同时保存在 FFY_logs 文件夹 · 点击底部「⚙ 收起」可关闭高级选项",
+                  style="Tiny.TLabel", background=C_CARD).pack(side="left", padx=(10, 0))
+        self.log = ScrolledText(lf, height=8, state="disabled", font=("Consolas", 9),
                                 wrap="char", bg="#FAFBFD", fg=C_MUT, relief="flat",
                                 insertbackground=C_TEXT, selectbackground="#DCE4FA")
         self.log.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -1134,10 +1234,36 @@ class App:
     # ------------------------------------------------------------ 高级面板
     def toggle_advanced(self):
         if self.adv.winfo_ismapped():
+            # 收起高级：恢复工具栏按钮 + 顶栏按钮恢复白色"高级选项"
             self.adv.grid_remove()
+            try:
+                self.btn_add.pack(side="left")
+                self.btn_scan.pack(side="left", padx=(10, 0))
+                self.btn_reprobe.pack(side="left", padx=(10, 0))
+                self.btn_remove.pack(side="left", padx=(10, 0))
+            except Exception:
+                pass
+            try:
+                self._bar2.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+            except Exception:
+                pass
+            self.btn_adv.set_kind("soft")
             self.btn_adv.set_text("⚙ 高级选项")
         else:
+            # 展开高级：隐藏工具栏按钮；顶栏按钮变紫色（primary）文案"⚙ 收起"
+            try:
+                self.btn_add.pack_forget()
+                self.btn_scan.pack_forget()
+                self.btn_reprobe.pack_forget()
+                self.btn_remove.pack_forget()
+            except Exception:
+                pass
+            try:
+                self._bar2.grid_remove()
+            except Exception:
+                pass
             self.adv.grid(row=1, column=0, sticky="ew", padx=12, pady=(10, 0))
+            self.btn_adv.set_kind("primary")
             self.btn_adv.set_text("⚙ 收起")
 
     def _on_advanced_changed(self, *_):
@@ -1249,9 +1375,19 @@ class App:
 
     def _update_ff_label(self):
         ok = self.cfg.validate()
-        self.lbl_ff.config(text=("● " + self.cfg.ffmpeg_path if ok
-                                 else "● 未找到 ffmpeg，点击“高级选项”设置路径"),
-                           foreground=(C_DIM if ok else C_ERR))
+        # ① 顶栏 lbl_ff：保持空白（ffmpeg 路径改在高级选项内显示）
+        if hasattr(self, "lbl_ff"):
+            self.lbl_ff.config(text="")
+        # ② 高级选项内的路径显示：✓/✗ 前缀 + 当前路径（过长用省略号）
+        if hasattr(self, "ff_path_label"):
+            path = self.cfg.ffmpeg_path or ""
+            prefix = "✓ " if ok else "✗ "
+            # 过长截断显示为「头…尾」
+            if len(path) > 78:
+                path = path[:38] + "…" + path[-36:]
+            color = C_OK if ok else C_ERR
+            self.ff_path_label.config(text=(prefix + path if path else prefix + "未设置"),
+                                      foreground=color)
 
     # ------------------------------------------------------------ 列表管理
     def add_files(self):
@@ -1319,8 +1455,8 @@ class App:
         t = Task(iid=iid, path=path, out_dir=out_dir, out_suffix=out_suffix)
         self.tasks[iid] = t
         self.tree.insert("", "end", iid=iid, image=self.img_sel,
-                         values=(os.path.basename(path), "", "", "", "", "", "",
-                                 "…", "…", "", "", "", ST_WAIT_PROBE, ""))
+                         values=(os.path.basename(path), "…", "…", "…", "…",
+                                 "…", "", "", "", ST_WAIT_PROBE, ""))
         self._update_overall()
         self._probe_async(t)
 
@@ -1401,6 +1537,7 @@ class App:
             {"auto": "自动策略", "copy_all": "全部直通", "ac3_all": "全部转AC3"}[cfg.audio_policy]), "dim")
         self.enc_thread = threading.Thread(target=self._encode_worker, args=(cfg,), daemon=True)
         self.enc_thread.start()
+        self._update_overall()
 
     def stop_batch(self):
         if not self.batch_running:
@@ -1556,6 +1693,7 @@ class App:
                         t.selected = not would_skip
                         self._refresh_row(t)
                         self._update_selall_button()
+                        self._update_overall()
                 elif kind == "probe_fail":
                     t = self.tasks.get(a)
                     if t:
@@ -1563,6 +1701,7 @@ class App:
                         t.note = "检测失败"
                         self._refresh_row(t)
                         self.log_line("检测失败：%s\n  %s" % (t.path, b), "err")
+                        self._update_overall()
                 elif kind == "row":
                     t = self.tasks.get(a)
                     if t:
@@ -1599,12 +1738,8 @@ class App:
         vals = {
             "name": (info["name"] if info else os.path.basename(t.path)),
             "res": (fmt_res(info["width"], info["height"]) or "—") if info else "…",
-            "bitrate": fmt_bitrate(info) if info else "",
-            "codec": ({"hevc": "H.265", "h264": "H.264"}.get(info["vcodec"],
-                      info["vcodec"].upper())) if info else "…",
-            "range": (info["hdr_type"] if info["is_hdr"] else "SDR") if info else "…",
-            "depth": ("%d bit" % info["depth"]) if info else "…",
-            "cspace": (CS_NAMES.get(info["primaries"], info["primaries"] or "—")) if info else "…",
+            "spec": video_spec_desc(info) if info else "…",
+            "bitrate": fmt_bitrate(info) if info else "…",
             "audio": audio_desc(info, cfg),
             "subs": sub_desc(info),
             "dur": fmt_duration(info["duration"]) if info else "",
@@ -1617,8 +1752,8 @@ class App:
                 "100%" if t.status == ST_DONE and t.progress >= 100 else ""),
         }
         self.tree.item(t.iid, values=tuple(vals[c] for c in
-                        ("name", "res", "bitrate", "codec", "range", "depth", "cspace",
-                         "audio", "subs", "dur", "size", "action", "status", "progress")),
+                        ("name", "res", "spec", "bitrate", "audio", "subs",
+                         "dur", "size", "action", "status", "progress")),
                        tags=(t.status,),
                        image=self.img_sel if t.selected else self.img_unsel)
 
@@ -1678,7 +1813,7 @@ class App:
         self.btn_selall.set_text("○ 取消全选" if all_sel else "◉ 全选")
 
     def _on_tree_motion(self, event):
-        """鼠标悬停显示单元格完整内容（文件名列显示完整路径）"""
+        """鼠标悬停显示单元格完整内容（规格列显示多行明细）"""
         if self.tree.identify_region(event.x, event.y) not in ("cell", "tree"):
             self._tip_hide()
             return
@@ -1687,27 +1822,47 @@ class App:
         if not iid or not col or col == "#0":
             self._tip_hide()
             return
-        try:
-            idx = int(col[1:]) - 1
-        except ValueError:
-            self._tip_hide()
-            return
         t = self.tasks.get(iid)
         if not t:
             self._tip_hide()
             return
-        if idx == 0:  # 文件名列 → 完整路径
-            text = t.path
-        else:
-            try:
-                text = str(self.tree.set(iid, self.tree.column(col, "id")) or "")
-            except tk.TclError:
-                self._tip_hide()
-                return
+        text = self._tip_text_for(t, self.tree.column(col, "id"))
         if not text:
             self._tip_hide()
             return
         self._tip_show(text, event.x_root, event.y_root)
+
+    def _tip_text_for(self, t: Task, col_id):
+        """返回某列的悬停提示文本；规格列给出带标签的多行明细"""
+        if col_id == "name":  # 文件名列 → 完整路径
+            return t.path
+        if col_id == "spec" and t.info:
+            i = t.info
+            lines = ["编码　　%s" % ({"hevc": "H.265 (HEVC)", "h264": "H.264 (AVC)"}
+                                  .get(i["vcodec"], i["vcodec"].upper()))]
+            if i.get("vprofile"):
+                lines[0] += " · %s" % i["vprofile"]
+            lines.append("动态范围　%s" % (i["hdr_type"] if i["is_hdr"] else "SDR（标准动态范围）"))
+            lines.append("色深　　%d bit" % i["depth"])
+            lines.append("色彩空间　%s" % CS_NAMES.get(i["primaries"], i["primaries"] or "—"))
+            if i.get("fps"):
+                fps = i["fps"]
+                lines.append("帧率　　%g fps" % fps)
+            return "\n".join(lines)
+        if col_id == "audio" and t.info and t.info["audios"]:
+            cfg = self.cfg
+            lines = []
+            for tr in t.info["audios"]:
+                label = audio_track_label(tr)
+                act, _p = audio_track_plan(tr, cfg.audio_policy)
+                mark = "✓ 直通保留" if act == "copy" else "→ 转 AC3 5.1"
+                lang = ("（%s）" % tr["lang"]) if tr.get("lang") else ""
+                lines.append("%s%s　%s" % (label, lang, mark))
+            return "\n".join(lines)
+        try:
+            return str(self.tree.set(t.iid, col_id) or "")
+        except tk.TclError:
+            return ""
 
     def _tip_show(self, text, x, y):
         if self._tip is None:
@@ -1736,6 +1891,7 @@ class App:
         n = len(self.tasks)
         n_sel = sum(1 for t in self.tasks.values() if t.selected)
         done = sum(1 for t in self.tasks.values() if t.status in (ST_DONE, ST_SKIP, ST_FAIL, ST_ABORT))
+        n_probe = sum(1 for t in self.tasks.values() if t.status == ST_PROBING)
         running = next((t for t in self.tasks.values() if t.status == ST_RUNNING), None)
         pct = 0.0
         if n:
@@ -1756,6 +1912,43 @@ class App:
         self.lbl_overall.config(
             text=("%d/%d 完成 · 已选 %d%s" % (done, n, n_sel, extra)) if n
             else "就绪 · 共 0 个文件")
+
+        # ---- 顶部 header_status 动态状态（与整体阶段联动，不占用额外空间）----
+        if hasattr(self, "header_status"):
+            if self.batch_running:
+                # 正在转码（显示整体进度百分比 + 剩余时间）
+                s = "转码中 · 整体 %d%% · %d/%d 完成" % (round(pct), done, n)
+                if extra:
+                    s += extra.replace(" · 剩余", " · 剩余")
+                color = C_ACCENT
+            elif n_probe > 0:
+                s = "检测中 · 正在解析 %d 个文件的媒体信息…" % n_probe
+                color = C_MUT
+            elif n == 0:
+                s = "就绪 — 添加影片或扫描文件夹即可开始"
+                color = C_MUT
+            elif done == n and n > 0:
+                fail = sum(1 for t in self.tasks.values() if t.status in (ST_FAIL, ST_ABORT))
+                skip = sum(1 for t in self.tasks.values() if t.status == ST_SKIP)
+                ok = sum(1 for t in self.tasks.values() if t.status == ST_DONE)
+                parts = []
+                if ok: parts.append("✓完成 %d" % ok)
+                if skip: parts.append("跳过 %d" % skip)
+                if fail: parts.append("失败 %d" % fail)
+                s = "已处理完所有 %d 个文件（%s）" % (n, " · ".join(parts))
+                color = C_ERR if fail else C_OK
+            else:
+                # 存在待处理文件：给出简洁行动建议（与所选同步）
+                parts = ["共 %d 个文件" % n]
+                if n_sel:
+                    parts.append("已选 %d 个待转码" % n_sel)
+                else:
+                    parts.append("还未勾选（可点「智能选择」）")
+                if done:
+                    parts.append("已完成 %d" % done)
+                s = " · ".join(parts)
+                color = C_MUT
+            self.header_status.config(text=s, foreground=color)
 
     # ------------------------------------------------------------ 菜单/其他
     def _popup_menu(self, event):
