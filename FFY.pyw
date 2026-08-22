@@ -32,7 +32,7 @@ from tkinter.scrolledtext import ScrolledText
 # 常量
 # ----------------------------------------------------------------------------
 APP_TITLE = "FFY · ffmpeg_for_YYHome"
-APP_VER = "V0.1.6"
+APP_VER = "V0.1.7"
 DEFAULT_FFMPEG = r"C:\Installed\FFmpeg\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_config.json")
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FFY_logs")
@@ -106,6 +106,8 @@ class Settings:
     out_subfolder: str = "FFY_输出"
     out_custom: str = ""
     overwrite: bool = False
+    out_prefix: str = "FFY_"       # 输出文件名前缀
+    out_suffix_cfg: str = ""       # 输出文件名后缀（放在 .mkv 前，与平铺重名 "(N)" 后缀分开）
 
     def validate(self):
         return bool(self.ffmpeg_path) and os.path.isfile(self.ffmpeg_path)
@@ -388,16 +390,22 @@ def resolve_out_path(info, cfg: Settings, task=None):
     stem = os.path.splitext(os.path.basename(src))[0]
     if stem.lower().endswith(".ffy"):
         stem = stem[:-4]
+    prefix = getattr(cfg, "out_prefix", "") or ""
+    usuffix = getattr(cfg, "out_suffix_cfg", "") or ""
     if task is not None and getattr(task, "out_dir", ""):
         # 文件夹批量任务：统一输出到指定目录（忽略原层级），重名加后缀
         d = task.out_dir
-        stem += getattr(task, "out_suffix", "") or ""
+        flat_suffix = getattr(task, "out_suffix", "") or ""
+        stem = prefix + stem + usuffix + flat_suffix
     elif cfg.out_mode == "subfolder":
         d = os.path.join(os.path.dirname(src), cfg.out_subfolder or "FFY_输出")
+        stem = prefix + stem + usuffix
     elif cfg.out_mode == "same":
         d = os.path.dirname(src)
+        stem = prefix + stem + usuffix
     else:
         d = cfg.out_custom or os.path.dirname(src)
+        stem = prefix + stem + usuffix
     out = os.path.join(d, stem + ".mkv")
     if os.path.abspath(out) == os.path.abspath(src):
         out = os.path.join(d, stem + ".FFY.mkv")
@@ -663,6 +671,21 @@ def pill_badge(parent, text, fg, bg, panel=C_CARD, size=9, height=22):
     return cv
 
 
+def make_circle_img(size, fill, ring):
+    """生成圆形勾选图标：内部 fill 色、边缘 ring 色"""
+    img = tk.PhotoImage(width=size, height=size)
+    c = (size - 1) / 2.0
+    r = size / 2.0 - 1.0
+    for y in range(size):
+        for x in range(size):
+            d = ((x - c) ** 2 + (y - c) ** 2) ** 0.5
+            if d <= r - 1.2:
+                img.put(fill, (x, y))
+            elif d <= r:
+                img.put(ring, (x, y))
+    return img
+
+
 class CuteProgress(tk.Canvas):
     """圆角药丸进度条：与 CuteButton 同风格，居中显示百分比，随窗口伸缩"""
 
@@ -862,17 +885,14 @@ class App:
         main = ttk.Frame(outer, style="Card.TFrame", padding=14)
         main.grid(row=2, column=0, sticky="nsew", padx=12, pady=(10, 0))
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(1, weight=1)
+        main.rowconfigure(2, weight=1)
 
         bar = ttk.Frame(main, style="Card.TFrame")
-        bar.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         CuteButton(bar, text="＋ 添加影片", kind="primary", height=46, size=12,
                    bg=C_CARD, command=self.add_files).pack(side="left")
         CuteButton(bar, text="⌕ 扫描文件夹", height=46, bg=C_CARD,
                    command=self.add_folder).pack(side="left", padx=(10, 0))
-        self.btn_selall = CuteButton(bar, text="◉ 全选", height=46, bg=C_CARD,
-                                     command=self.toggle_select_all)
-        self.btn_selall.pack(side="left", padx=(10, 0))
         CuteButton(bar, text="↻ 重新检测", height=46, bg=C_CARD,
                    command=self.reprobe_selected).pack(side="left", padx=(10, 0))
         CuteButton(bar, text="✕ 移除", height=46, bg=C_CARD,
@@ -881,26 +901,42 @@ class App:
                                   command=self.toggle_advanced)
         self.btn_adv.pack(side="right")
 
-        cols = ("sel", "name", "res", "bitrate", "codec", "range", "depth", "cspace",
+        # 第二行：选择操作（小按钮，与导入操作区分）
+        bar2 = ttk.Frame(main, style="Card.TFrame")
+        bar2.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        self.btn_selall = CuteButton(bar2, text="◉ 全选", height=34, size=10, padx=16,
+                                     bg=C_CARD, command=self.toggle_select_all)
+        self.btn_selall.pack(side="left")
+        CuteButton(bar2, text="✦ 智能选择", height=34, size=10, padx=16, bg=C_CARD,
+                   command=self.smart_select_all).pack(side="left", padx=(8, 0))
+        ttk.Label(bar2, text="智能选择＝只勾选需要转码的文件",
+                  style="Tiny.TLabel", background=C_CARD).pack(side="left", padx=(10, 2))
+
+        cols = ("name", "res", "bitrate", "codec", "range", "depth", "cspace",
                 "audio", "subs", "dur", "size", "action", "status", "progress")
-        texts = {"sel": "", "name": "文件名", "res": "分辨率", "bitrate": "码率",
+        texts = {"name": "文件名", "res": "分辨率", "bitrate": "码率",
                  "codec": "编码", "range": "动态范围", "depth": "色深", "cspace": "色彩空间",
                  "audio": "音频（自动决策）", "subs": "字幕", "dur": "时长", "size": "大小",
                  "action": "动作", "status": "状态", "progress": "进度"}
-        widths = {"sel": 38, "name": 190, "res": 60, "bitrate": 74, "codec": 54,
+        widths = {"name": 190, "res": 60, "bitrate": 74, "codec": 54,
                   "range": 62, "depth": 48, "cspace": 70, "audio": 190, "subs": 70,
                   "dur": 62, "size": 72, "action": 165, "status": 68, "progress": 54}
-        CENTER = ("sel", "res", "bitrate", "codec", "range", "depth", "cspace",
+        CENTER = ("res", "bitrate", "codec", "range", "depth", "cspace",
                   "dur", "size", "status", "progress")
         wrap = ttk.Frame(main, style="Card.TFrame")
-        wrap.grid(row=1, column=0, sticky="nsew")
+        wrap.grid(row=2, column=0, sticky="nsew")
         wrap.columnconfigure(0, weight=1)
         wrap.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
+        # 大号圆形勾选图标（选中=主色实心，未选=灰色圆环）
+        self.img_sel = make_circle_img(18, C_ACCENT, C_ACCENT_P)
+        self.img_unsel = make_circle_img(18, "#FFFFFF", "#C9D2E4")
+        self.tree = ttk.Treeview(wrap, columns=cols, show="tree headings",
                                  selectmode="extended", style="Treeview")
+        self.tree.heading("#0", text="")
+        self.tree.column("#0", width=42, minwidth=36, stretch=False, anchor="center")
         for c in cols:
             self.tree.heading(c, text=texts[c])
-            self.tree.column(c, width=widths[c], minwidth=36 if c == "sel" else 46,
+            self.tree.column(c, width=widths[c], minwidth=46,
                              anchor="center" if c in CENTER else "w",
                              stretch=(c == "name"))
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
@@ -953,6 +989,12 @@ class App:
             sb.bind("<KeyRelease>", lambda e: self._on_advanced_changed())
         self.sp_crf.bind("<KeyRelease>", lambda e: self._on_advanced_changed())
         self.cmb_preset.bind("<<ComboboxSelected>>", lambda e: self._on_advanced_changed())
+        # 第一行末项：ffmpeg 路径（明显的按钮，与前面保持一段距离）
+        ttk.Frame(r1, width=60, style="Card.TFrame").pack(side="left", fill="x")
+        self.btn_ffmpeg = CuteButton(r1, text="📂 ffmpeg 路径…", kind="soft",
+                                     height=36, size=10, padx=20, bg=C_CARD,
+                                     command=self.pick_ffmpeg)
+        self.btn_ffmpeg.pack(side="right")
 
         r2 = ttk.Frame(self.adv, style="Card.TFrame"); r2.grid(row=2, column=0, columnspan=4, sticky="ew", pady=2)
         self.var_hwdec = tk.BooleanVar(value=True)
@@ -1012,8 +1054,30 @@ class App:
         self.var_overwrite = tk.BooleanVar(value=False)
         self.ck_over = ttk.Checkbutton(r4, text="覆盖已存在输出", style="Card.TCheckbutton",
                                        variable=self.var_overwrite, command=self._on_advanced_changed)
-        CuteButton(r4, text="ffmpeg 路径…", height=36, size=10, padx=18, bg=C_CARD,
-                   command=self.pick_ffmpeg).pack(side="right")
+
+        r45 = ttk.Frame(self.adv, style="Card.TFrame"); r45.grid(row=55, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Label(r45, text="文件命名", style="CardDim.TLabel").pack(side="left")
+        self.var_prefix = tk.StringVar(value="FFY_")
+        tk.Label(r45, text="前缀", fg=C_MUT, bg=C_CARD, font=(F, 10)).pack(side="left", padx=(8, 4))
+        ttk.Entry(r45, textvariable=self.var_prefix, width=14).pack(side="left")
+        self.var_suffix_cfg = tk.StringVar(value="")
+        tk.Label(r45, text="后缀", fg=C_MUT, bg=C_CARD, font=(F, 10)).pack(side="left", padx=(14, 4))
+        ttk.Entry(r45, textvariable=self.var_suffix_cfg, width=14).pack(side="left")
+        ttk.Label(r45, text="最终文件名示例：FFY_电影_x265.mkv",
+                  style="Tiny.TLabel", background=C_CARD).pack(side="left", padx=(14, 0))
+        for sv in (self.var_prefix, self.var_suffix_cfg):
+            # 绑定到所有 Entry：trace 不需要手动写
+            pass
+        # 前缀后缀改动时同步保存
+        for en in r45.winfo_children():
+            if isinstance(en, ttk.Entry):
+                en.bind("<KeyRelease>", lambda e: self._on_advanced_changed())
+
+        # 底部右侧：明显的收起按钮（与左上「高级选项」同一切换）
+        rb = ttk.Frame(self.adv, style="Card.TFrame")
+        rb.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        CuteButton(rb, text="▲ 收起高级选项", kind="primary", height=36, size=11,
+                   bg=C_CARD, command=self.toggle_advanced).pack(side="right")
 
         # ---- 日志（收纳于高级选项内）----
         lf = ttk.Frame(self.adv, style="Card.TFrame")
@@ -1116,6 +1180,8 @@ class App:
         c.out_subfolder = self.var_subfolder.get().strip() or "FFY_输出"
         c.out_custom = self.var_outcustom.get().strip()
         c.overwrite = bool(self.var_overwrite.get())
+        c.out_prefix = self.var_prefix.get()
+        c.out_suffix_cfg = self.var_suffix_cfg.get()
         return c
 
     def _load_cfg_to_ui(self):
@@ -1136,6 +1202,8 @@ class App:
         self.var_subfolder.set(c.out_subfolder)
         self.var_outcustom.set(c.out_custom)
         self.var_overwrite.set(c.overwrite)
+        self.var_prefix.set(c.out_prefix)
+        self.var_suffix_cfg.set(c.out_suffix_cfg)
         self._sync_quality_widgets()
         self._sync_out_widgets()
 
@@ -1250,8 +1318,8 @@ class App:
         iid = str(self.iid_seq)
         t = Task(iid=iid, path=path, out_dir=out_dir, out_suffix=out_suffix)
         self.tasks[iid] = t
-        self.tree.insert("", "end", iid=iid,
-                         values=("●", os.path.basename(path), "", "", "", "", "", "",
+        self.tree.insert("", "end", iid=iid, image=self.img_sel,
+                         values=(os.path.basename(path), "", "", "", "", "", "",
                                  "…", "…", "", "", "", ST_WAIT_PROBE, ""))
         self._update_overall()
         self._probe_async(t)
@@ -1529,7 +1597,6 @@ class App:
         cfg = self.cfg
         info = t.info
         vals = {
-            "sel": "●" if t.selected else "○",
             "name": (info["name"] if info else os.path.basename(t.path)),
             "res": (fmt_res(info["width"], info["height"]) or "—") if info else "…",
             "bitrate": fmt_bitrate(info) if info else "",
@@ -1550,16 +1617,15 @@ class App:
                 "100%" if t.status == ST_DONE and t.progress >= 100 else ""),
         }
         self.tree.item(t.iid, values=tuple(vals[c] for c in
-                        ("sel", "name", "res", "bitrate", "codec", "range", "depth", "cspace",
+                        ("name", "res", "bitrate", "codec", "range", "depth", "cspace",
                          "audio", "subs", "dur", "size", "action", "status", "progress")),
-                       tags=(t.status,))
+                       tags=(t.status,),
+                       image=self.img_sel if t.selected else self.img_unsel)
 
     # ------------------------------------------------------------ 选择与悬停提示
     def _on_tree_click(self, event):
         """点击最前面的圆形选择框：切换该行是否参与转码"""
-        if self.tree.identify_region(event.x, event.y) != "cell":
-            return
-        if self.tree.identify_column(event.x) != "#1":
+        if self.tree.identify_column(event.x) != "#0":
             return
         iid = self.tree.identify_row(event.y)
         t = self.tasks.get(iid)
@@ -1580,6 +1646,32 @@ class App:
         self._update_selall_button()
         self._update_overall()
 
+    def smart_select_all(self):
+        """智能选择：重新按当前策略勾选——需要转码的勾上，已达标的取消"""
+        cfg = self._read_cfg_from_ui()
+        n_sel = n_skip = 0
+        for t in self.tasks.values():
+            if t.status == ST_RUNNING or not t.info:
+                continue
+            would_skip = (cfg.skip_compliant and video_ok(t.info)
+                          and audio_all_passthrough(t.info, cfg))
+            t.selected = not would_skip
+            if t.selected:
+                n_sel += 1
+            else:
+                n_skip += 1
+            self._refresh_row(t)
+        self._update_selall_button()
+        self._update_overall()
+        probed = n_sel + n_skip
+        if probed:
+            self.log_line("智能选择：勾选 %d 个待转码，%d 个已达标取消勾选" % (n_sel, n_skip), "dim")
+            messagebox.showinfo(APP_TITLE + " · 智能选择",
+                                "已按当前策略重新勾选：\n\n● 将转码：%d 个\n○ 已达标（无需转码）：%d 个"
+                                % (n_sel, n_skip))
+        else:
+            messagebox.showinfo(APP_TITLE + " · 智能选择", "还没有完成检测的文件。")
+
     def _update_selall_button(self):
         ts = [t for t in self.tasks.values() if t.status != ST_RUNNING]
         all_sel = bool(ts) and all(t.selected for t in ts)
@@ -1587,12 +1679,12 @@ class App:
 
     def _on_tree_motion(self, event):
         """鼠标悬停显示单元格完整内容（文件名列显示完整路径）"""
-        if self.tree.identify_region(event.x, event.y) != "cell":
+        if self.tree.identify_region(event.x, event.y) not in ("cell", "tree"):
             self._tip_hide()
             return
         iid = self.tree.identify_row(event.y)
         col = self.tree.identify_column(event.x)
-        if not iid or not col:
+        if not iid or not col or col == "#0":
             self._tip_hide()
             return
         try:
@@ -1601,10 +1693,10 @@ class App:
             self._tip_hide()
             return
         t = self.tasks.get(iid)
-        if idx == 0:  # 选择框列
+        if not t:
             self._tip_hide()
             return
-        if t and idx == 1:  # 文件名列 → 完整路径
+        if idx == 0:  # 文件名列 → 完整路径
             text = t.path
         else:
             try:
